@@ -1,0 +1,339 @@
+diff --git a/.vscode/c_cpp_properties.json b/.vscode/c_cpp_properties.json
+new file mode 100644
+index 0000000..cb39b27
+--- /dev/null
++++ b/.vscode/c_cpp_properties.json
+@@ -0,0 +1,17 @@
++{
++    "configurations": [
++        {
++            "name": "Linux",
++            "includePath": [
++                "${workspaceFolder}/**",
++                "${workspaceFolder}"
++            ],
++            "defines": [],
++            "compilerPath": "/usr/bin/gcc",
++            "cStandard": "gnu17",
++            "cppStandard": "gnu++14",
++            "intelliSenseMode": "linux-gcc-x64"
++        }
++    ],
++    "version": 4
++}
+\ No newline at end of file
+diff --git a/Makefile b/Makefile
+index 0fbaf7c..4106139 100644
+--- a/Makefile
++++ b/Makefile
+@@ -149,6 +149,10 @@ UPROGS=\
+ 	$U/_grind\
+ 	$U/_wc\
+ 	$U/_zombie\
++	$U/_sleep\
++	$U/_pingpong\
++	$U/_primes\
++	$U/_find\
+ 
+ 
+ ifeq ($(LAB),syscall)
+diff --git a/gradelib.pyc b/gradelib.pyc
+new file mode 100644
+index 0000000..67b177b
+Binary files /dev/null and b/gradelib.pyc differ
+diff --git a/user/find.c b/user/find.c
+new file mode 100644
+index 0000000..44a5814
+--- /dev/null
++++ b/user/find.c
+@@ -0,0 +1,76 @@
++#include "user/user.h"
++#include "kernel/types.h"
++#include "user/user.h"
++#include "kernel/fs.h"
++#include "kernel/stat.h"
++
++void find(char const *path, char const *target)
++{
++    char buf[512], *p;
++    int fd;
++    struct dirent de;
++    struct stat st;
++
++    if ((fd = open(path, 0)) < 0) //打开路径下的文件，返回文件描述符
++    {
++        fprintf(2, "find: cannot open %s\n", path);
++        exit(1);
++    }
++
++    if (fstat(fd, &st) < 0) //显示文件的信息，如果文件不存在则返回-1
++    {
++        fprintf(2, "find: cannot stat %s\n", path);
++        close(fd);
++        exit(1);
++    }
++
++    switch (st.type)
++    {
++    case T_FILE:
++        fprintf(2, "Usage: find dir file\n");
++        exit(1);
++
++    case T_DIR:
++        if (strlen(path) + 1 + DIRSIZ + 1 > sizeof buf)
++        {
++            printf("find: path too long\n");
++            break;
++        }
++        strcpy(buf, path);
++        p = buf + strlen(buf);
++        *p++ = '/';
++        while (read(fd, &de, sizeof(de)) == sizeof(de))
++        {
++            if (de.inum == 0 || strcmp(de.name, ".") == 0 || strcmp(de.name, "..") == 0)
++                continue;
++            memmove(p, de.name, DIRSIZ);
++            p[DIRSIZ] = 0;
++            if (stat(buf, &st) < 0)
++            {
++                printf("find: cannot stat %s\n", buf);
++                continue;
++            }
++            if (st.type == T_DIR)
++                find(buf, target);
++            else if (st.type == T_FILE)
++                if (strcmp(de.name, target) == 0)
++                    printf("%s\n", buf);
++        }
++        break;
++    }
++    close(fd);
++}
++
++int main(int argc, char const *argv[])
++{
++    if (argc != 3)
++    {
++        fprintf(2, "Usage:find dir file\n");
++        exit(1);
++    }
++
++    char const *path = argv[1];
++    char const *target = argv[2];
++    find(path, target);
++    exit(0);
++}
+diff --git a/user/pingpong.c b/user/pingpong.c
+new file mode 100644
+index 0000000..9ffcaa5
+--- /dev/null
++++ b/user/pingpong.c
+@@ -0,0 +1,33 @@
++#include "user/user.h"
++#include "kernel/types.h"
++
++int main(void)
++{
++    //首先使用一个大小为2的二维数组创建一个管道
++    int parent_pipefd[2];//用于父进程发送消息
++    int child_pipefd[2];//用于子进程发送消息
++    pipe(parent_pipefd);//创建管道
++    pipe(child_pipefd);//创建管道
++
++    char msg='0';//子进程返回的消息
++    char* buf=(char*)malloc(sizeof(char));//写缓冲区
++
++    int pid=fork();//创建子进程
++    
++    if(!pid)//子进程
++    {
++        close(parent_pipefd[1]); //关闭父进程的写文件描述符
++        close(child_pipefd[0]);  //关闭子进程的读文件描述符
++        read(parent_pipefd[0], &buf, 1);
++        printf("%d: received ping\n", getpid());
++        write(child_pipefd[1], &msg, 1);
++    }
++    else{
++        close(parent_pipefd[0]); //关闭父进程管道的读文件描述符
++        close(child_pipefd[1]);  //关闭子进程管道的写文件描述符
++        write(parent_pipefd[1], &msg, 1);
++        read(child_pipefd[0], &buf, 1);
++        printf("%d: received pong\n", getpid());
++    }
++    exit(0);
++}
+\ No newline at end of file
+diff --git a/user/primes.c b/user/primes.c
+new file mode 100644
+index 0000000..7ec8ee0
+--- /dev/null
++++ b/user/primes.c
+@@ -0,0 +1,71 @@
++#include "kernel/types.h"
++#include "kernel/stat.h"
++#include "user/user.h"
++
++void newPipe(int fd[2])
++{
++    int prime;
++    int flag;
++    int num;                                             //存放后续读出的数字
++    close(fd[1]);                                        //在读时关闭写文件描述符
++    if (read(fd[0], &prime, sizeof(int)) != sizeof(int)) //将文件中的数逐个读入prime中，显然，第一个读的数字肯定是prime
++    {
++        fprintf(2, "child process failed when reading the number.\n");
++        exit(1);
++    }
++    printf("prime %d\n", prime); //输出筛选得出的素数
++
++    flag = read(fd[0], &num, sizeof(int));
++    if (flag)
++    {
++        int newpipefd[2]; //存放新的管道的文件描述符
++        pipe(newpipefd);
++        if (fork() == 0)
++        {
++            newPipe(newpipefd);
++        }
++        else
++        {
++            close(newpipefd[0]); //在写时关闭读文件描述符
++            if (num % prime != 0)
++                write(newpipefd[1], &num, sizeof(num));
++
++            while (read(fd[0], &num, sizeof(int)))
++            {
++                if (num % prime)
++                    write(newpipefd[1], &num, sizeof(int));
++            }
++            close(fd[0]);
++            close(newpipefd[1]);
++            wait(0); //递归等待子进程结束
++        }
++    }
++    exit(0);
++}
++
++int main(int argc, char *argv)
++{
++    int pipefd[2];   //用于存放新建的读写文件描述符
++    pipe(pipefd);    //创建筛选前的第一个管道
++    if (fork() == 0) //子进程
++    {
++        newPipe(pipefd);
++    }
++    else
++    {
++        close(pipefd[0]); //写时释放读描述符
++        //依次写入2-35数字
++        for (int i = 2; i <= 35; i++)
++        {
++            if (write(pipefd[1], &i, sizeof(int)) != sizeof(int)) //我们认为只要写的字符数不等于可以写的最大字符数均为写失败
++            {
++                fprintf(2, "writing the number %d to the pipe failed!\n", i);
++                exit(1);
++            }
++        }
++        close(pipefd[1]); //关闭写通道
++        wait(0);          //等待子进程的结束
++        exit(0);
++    }
++    return 0;
++}
+\ No newline at end of file
+diff --git a/user/sleep.c b/user/sleep.c
+new file mode 100644
+index 0000000..03444d6
+--- /dev/null
++++ b/user/sleep.c
+@@ -0,0 +1,17 @@
++
++#include "user/user.h"
++#include "kernel/types.h"
++
++int main(int argc, char *argv[])
++{
++    if (argc != 2) //表示用户没有传递参数
++    {
++        fprintf(2, "Error:User doesn't input any argument\n");
++        exit(1);
++    }
++    else
++    {
++        sleep(atoi(argv[1])); //命令行第一个参数，也就是指定的滴答数
++    }
++    exit(0);
++}
+diff --git a/user/ulib.c b/user/ulib.c
+index 4775939..eac9379 100644
+--- a/user/ulib.c
++++ b/user/ulib.c
+@@ -22,7 +22,7 @@ strcmp(const char *p, const char *q)
+   return (uchar)*p - (uchar)*q;
+ }
+ 
+-uint
++int
+ strlen(const char *s)
+ {
+   int n;
+@@ -33,7 +33,7 @@ strlen(const char *s)
+ }
+ 
+ void*
+-memset(void *dst, int c, uint n)
++memset(void *dst, int c, int n)
+ {
+   char *cdst = (char *) dst;
+   int i;
+@@ -116,7 +116,7 @@ memmove(void *vdst, const void *vsrc, int n)
+ }
+ 
+ int
+-memcmp(const void *s1, const void *s2, uint n)
++memcmp(const void *s1, const void *s2, int n)
+ {
+   const char *p1 = s1, *p2 = s2;
+   while (n-- > 0) {
+@@ -130,7 +130,7 @@ memcmp(const void *s1, const void *s2, uint n)
+ }
+ 
+ void *
+-memcpy(void *dst, const void *src, uint n)
++memcpy(void *dst, const void *src, int n)
+ {
+   return memmove(dst, src, n);
+ }
+diff --git a/user/umalloc.c b/user/umalloc.c
+index 2092a32..4fdb374 100644
+--- a/user/umalloc.c
++++ b/user/umalloc.c
+@@ -61,7 +61,7 @@ morecore(uint nu)
+ }
+ 
+ void*
+-malloc(uint nbytes)
++malloc(int nbytes)
+ {
+   Header *p, *prevp;
+   uint nunits;
+diff --git a/user/user.h b/user/user.h
+index b71ecda..8d793e8 100644
+--- a/user/user.h
++++ b/user/user.h
+@@ -33,10 +33,10 @@ int strcmp(const char*, const char*);
+ void fprintf(int, const char*, ...);
+ void printf(const char*, ...);
+ char* gets(char*, int max);
+-uint strlen(const char*);
+-void* memset(void*, int, uint);
+-void* malloc(uint);
++int strlen(const char*);
++void* memset(void*, int, int);
++void* malloc(int);
+ void free(void*);
+ int atoi(const char*);
+-int memcmp(const void *, const void *, uint);
+-void *memcpy(void *, const void *, uint);
++int memcmp(const void *, const void *, int);
++void *memcpy(void *, const void *, int);
