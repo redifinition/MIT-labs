@@ -1,0 +1,248 @@
+diff --git a/.vscode/settings.json b/.vscode/settings.json
+new file mode 100644
+index 0000000..e2f2d3b
+--- /dev/null
++++ b/.vscode/settings.json
+@@ -0,0 +1,7 @@
++{
++    "files.associations": {
++        "types.h": "c",
++        "param.h": "c",
++        "sysinfo.h": "c"
++    }
++}
+\ No newline at end of file
+diff --git a/Makefile b/Makefile
+index f0beb51..15ab2e8 100644
+--- a/Makefile
++++ b/Makefile
+@@ -149,6 +149,8 @@ UPROGS=\
+ 	$U/_grind\
+ 	$U/_wc\
+ 	$U/_zombie\
++	$U/_trace\
++	$U/_sysinfotest\
+ 
+ 
+ 
+diff --git a/gradelib.pyc b/gradelib.pyc
+new file mode 100644
+index 0000000..67b177b
+Binary files /dev/null and b/gradelib.pyc differ
+diff --git a/kernel/defs.h b/kernel/defs.h
+index 4b9bbc0..5ef74f5 100644
+--- a/kernel/defs.h
++++ b/kernel/defs.h
+@@ -63,9 +63,10 @@ void            ramdiskrw(struct buf*);
+ void*           kalloc(void);
+ void            kfree(void *);
+ void            kinit(void);
++uint64          freememory(void);
+ 
+ // log.c
+-void            initlog(int, struct superblock*);
++void initlog(int, struct superblock *);
+ void            log_write(struct buf*);
+ void            begin_op(void);
+ void            end_op(void);
+@@ -104,6 +105,7 @@ void            yield(void);
+ int             either_copyout(int user_dst, uint64 dst, void *src, uint64 len);
+ int             either_copyin(void *dst, int user_src, uint64 src, uint64 len);
+ void            procdump(void);
++int             proc_size(void);
+ 
+ // swtch.S
+ void            swtch(struct context*, struct context*);
+diff --git a/kernel/kalloc.c b/kernel/kalloc.c
+index fa6a0ac..b62c3bd 100644
+--- a/kernel/kalloc.c
++++ b/kernel/kalloc.c
+@@ -80,3 +80,16 @@ kalloc(void)
+     memset((char*)r, 5, PGSIZE); // fill with junk
+   return (void*)r;
+ }
++
++uint64
++freememory()
++{
++  struct run *p = kmem.freelist;
++  uint64 num = 0;
++  while (p)
++  {
++    num++;
++    p = p->next;
++  }
++  return num * PGSIZE;
++}
+\ No newline at end of file
+diff --git a/kernel/proc.c b/kernel/proc.c
+index 6afafa1..3b994e6 100644
+--- a/kernel/proc.c
++++ b/kernel/proc.c
+@@ -291,6 +291,9 @@ fork(void)
+ 
+   safestrcpy(np->name, p->name, sizeof(p->name));
+ 
++  // 复制 mask
++  np->mask = p->mask;
++
+   pid = np->pid;
+ 
+   np->state = RUNNABLE;
+@@ -693,3 +696,15 @@ procdump(void)
+     printf("\n");
+   }
+ }
++
++int proc_size()
++{
++  int i;
++  int n = 0;
++  for (i = 0; i < NPROC; i++)
++  {
++    if (proc[i].state != UNUSED)
++      n++;
++  }
++  return n;
++}
+\ No newline at end of file
+diff --git a/kernel/proc.h b/kernel/proc.h
+index 9c16ea7..2919011 100644
+--- a/kernel/proc.h
++++ b/kernel/proc.h
+@@ -103,4 +103,5 @@ struct proc {
+   struct file *ofile[NOFILE];  // Open files
+   struct inode *cwd;           // Current directory
+   char name[16];               // Process name (debugging)
++  int mask;                    // 添加mask值
+ };
+diff --git a/kernel/syscall.c b/kernel/syscall.c
+index c1b3670..1a79c9f 100644
+--- a/kernel/syscall.c
++++ b/kernel/syscall.c
+@@ -104,6 +104,8 @@ extern uint64 sys_unlink(void);
+ extern uint64 sys_wait(void);
+ extern uint64 sys_write(void);
+ extern uint64 sys_uptime(void);
++extern uint64 sys_trace(void); // 添加sys_trace声明
++extern uint64 sys_sysinfo(void);//田间sys_sysinfo声明
+ 
+ static uint64 (*syscalls[])(void) = {
+ [SYS_fork]    sys_fork,
+@@ -127,8 +129,15 @@ static uint64 (*syscalls[])(void) = {
+ [SYS_link]    sys_link,
+ [SYS_mkdir]   sys_mkdir,
+ [SYS_close]   sys_close,
++[SYS_trace]   sys_trace,
++[SYS_sysinfo] sys_sysinfo,
+ };
+ 
++// 添加识别名
++char *syscalls_name[23] = {"", "fork", "exit", "wait", "pipe", "read", "kill", "exec",
++                           "fstat", "chdir", "dup", "getpid", "sbrk", "sleep", "uptime",
++                           "open", "write", "mknod", "unlink", "link", "mkdir", "close", "trace",};
++
+ void
+ syscall(void)
+ {
+@@ -138,6 +147,11 @@ syscall(void)
+   num = p->trapframe->a7;
+   if(num > 0 && num < NELEM(syscalls) && syscalls[num]) {
+     p->trapframe->a0 = syscalls[num]();
++    // 添加追踪功能
++    if (p->mask & (1 << num))
++    {
++      printf("%d: syscall %s -> %d\n", p->pid, syscalls_name[num], p->trapframe->a0);
++    }
+   } else {
+     printf("%d %s: unknown sys call %d\n",
+             p->pid, p->name, num);
+diff --git a/kernel/syscall.h b/kernel/syscall.h
+index bc5f356..e153363 100644
+--- a/kernel/syscall.h
++++ b/kernel/syscall.h
+@@ -20,3 +20,5 @@
+ #define SYS_link   19
+ #define SYS_mkdir  20
+ #define SYS_close  21
++#define SYS_trace  22
++#define SYS_sysinfo 23
+\ No newline at end of file
+diff --git a/kernel/sysproc.c b/kernel/sysproc.c
+index e8bcda9..c63c62c 100644
+--- a/kernel/sysproc.c
++++ b/kernel/sysproc.c
+@@ -6,6 +6,9 @@
+ #include "memlayout.h"
+ #include "spinlock.h"
+ #include "proc.h"
++#include "sysinfo.h"
++
++
+ 
+ uint64
+ sys_exit(void)
+@@ -95,3 +98,30 @@ sys_uptime(void)
+   release(&tickslock);
+   return xticks;
+ }
++
++uint64
++sys_trace(void)
++{
++  int n;
++  if (argint(0, &n) < 0) // 判断参数是否获取成功
++    return -1;
++  myproc()->mask = n; // 将argv[1]保存到当前进程的mask中
++  return 0;
++}
++
++uint64
++sys_sysinfo(void)
++{
++  struct sysinfo info;
++  uint64 addr;
++  // 获取用户态传入的sysinfo结构体
++  if (argaddr(0, &addr) < 0)
++    return -1;
++  struct proc *p = myproc();
++  info.freemem = freememory();
++  info.nproc = proc_size();
++  // 将内核态中的info复制到用户态
++  if (copyout(p->pagetable, addr, (char *)&info, sizeof(info)) < 0)
++    return -1;
++  return 0;
++}
+\ No newline at end of file
+diff --git a/time.txt b/time.txt
+new file mode 100644
+index 0000000..9a03714
+--- /dev/null
++++ b/time.txt
+@@ -0,0 +1 @@
++10
+\ No newline at end of file
+diff --git a/user/user.h b/user/user.h
+index b71ecda..c82ca1f 100644
+--- a/user/user.h
++++ b/user/user.h
+@@ -23,6 +23,9 @@ int getpid(void);
+ char* sbrk(int);
+ int sleep(int);
+ int uptime(void);
++int trace(int);
++struct sysinfo;
++int sysinfo(struct sysinfo *);
+ 
+ // ulib.c
+ int stat(const char*, struct stat*);
+diff --git a/user/usys.pl b/user/usys.pl
+index 01e426e..bc109fd 100755
+--- a/user/usys.pl
++++ b/user/usys.pl
+@@ -36,3 +36,5 @@ entry("getpid");
+ entry("sbrk");
+ entry("sleep");
+ entry("uptime");
++entry("trace");
++entry("sysinfo");

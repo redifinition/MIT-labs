@@ -22,7 +22,7 @@ strcmp(const char *p, const char *q)
   return (uchar)*p - (uchar)*q;
 }
 
-int
+uint
 strlen(const char *s)
 {
   int n;
@@ -33,7 +33,7 @@ strlen(const char *s)
 }
 
 void*
-memset(void *dst, int c, int n)
+memset(void *dst, int c, uint n)
 {
   char *cdst = (char *) dst;
   int i;
@@ -116,7 +116,7 @@ memmove(void *vdst, const void *vsrc, int n)
 }
 
 int
-memcmp(const void *s1, const void *s2, int n)
+memcmp(const void *s1, const void *s2, uint n)
 {
   const char *p1 = s1, *p2 = s2;
   while (n-- > 0) {
@@ -130,7 +130,7 @@ memcmp(const void *s1, const void *s2, int n)
 }
 
 void *
-memcpy(void *dst, const void *src, int n)
+memcpy(void *dst, const void *src, uint n)
 {
   return memmove(dst, src, n);
 }
