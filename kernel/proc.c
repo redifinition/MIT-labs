@@ -106,7 +106,10 @@ allocproc(void)
 
 found:
   p->pid = allocpid();
-
+  p->ticks = 0;
+  p->alarm_interval = 0;
+  p->alarm_handler = 0;
+  p->in_alarm_handler = 0;
   // Allocate a trapframe page.
   if((p->trapframe = (struct trapframe *)kalloc()) == 0){
     release(&p->lock);
@@ -483,10 +486,14 @@ scheduler(void)
       }
       release(&p->lock);
     }
+#if !defined (LAB_FS)
     if(found == 0) {
       intr_on();
       asm volatile("wfi");
     }
+#else
+    ;
+#endif
   }
 }
 

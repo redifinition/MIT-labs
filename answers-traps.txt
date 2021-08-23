@@ -1,0 +1,32 @@
+Which registers contain arguments to functions? For example, which register holds 13 in main's call to printf?
+answer:
+RISC-V's function call process parameters are transferred by register first, that is,
+there are 8 registers in a0~a7. The return value can be placed in the a0 and a1 registers.
+The parameter 13 of printf is stored in the a2 register.
+
+Where is the call to function f in the assembly code for main? Where is the call to g? (Hint: the compiler may inline functions.)
+answer:
+As can be seen from the code, both of these are handled by inline optimization. 
+The f call in main uses the result 12 directly, 
+and the function g call in f is directly inlined in f.
+
+At what address is the functionprintflocated?
+answer:
+0x630
+
+What value is in the register ra just after the jalr to printf in main?
+answer:
+The value should be 0x38, which is the return address of the function.
+
+Run the following code.
+
+unsigned int i = 0x00646c72;
+printf("H%x Wo%s", 57616, &i);
+What is the output? Here's an ASCII table that maps bytes to characters.
+answer:
+The result is: He110 World; do not modify it to 0x726c6400; 57616 does not need to be changed, the compiler will convert it.
+
+In the following code, what is going to be printed after 'y='? (note: the answer is not a specific value.) Why does this happen? printf("x=%d y=%d", 3);
+answer:
+The value of register a2 should be printed out, because printf will read the third parameter from register a2 as the value of y.
+
