@@ -1,4 +1,4 @@
-# MIT labs 2020--lab5(Lazy Allocation) experiment documentation
+# MIT labs 2020--lab6(Copy-on-write Fork) experiment documentation
 
 | Student id | student name |
 | ---------- | ------------ |
@@ -6,311 +6,289 @@
 
 ## Purpose of this Experiment
 
-​	The purpose of this experiment is to understand one of the ingenious mechanisms of page table hardware: **lazy allocation of user-space heap memory**. Before using the lazy allocation mechanism, the xv6 program used the `sbrk()` system utility to request heap memory from the kernel. The kernel allocates and maps memory for a large request, which may take a long time to modify. This experiment requires us to modify the kernel code to implement the mechanism of lazy memory allocation.
+The purpose of this experiment is to implement another ingenious mechanism for page faults: copy-on write fork.
 
-## Pre-knowledge of  this lab
+## **Pre-knowledge of  this lab**
 
-​	Before completing this part of the experiment, we need to understand the page fault exception handling mechanism in xv6 in advance. The knowledge of this part of the mechanism is explained in detail **in section 4.6 of the xv6 book.** The following is a summary I made when I **read this part of the textbook and watched the replay of MIT's online course**.
-
-##### 1.Virtual Memory Address
-
-The benefits of using virtual memory:
-
-- **Isolation**. Each address has its own address space, so that there will be no malicious modification of the address space of other programs.
-- **level off indirection**. Program instructions only use virtual addresses, and the kernel defines the mapping from virtual addresses to physical addresses.
-
-After using page faults in virtual memory, you can let the kernel dynamically change the mapping.
-
-##### 2.System Call `sbrk()`
-
-​	This system call is an **eager allocation**. That is, once `sbrk` is called, the kernel will immediately allocate the physical memory required by the application. Under normal circumstances, it is difficult for an application to predict how much memory it needs. Therefore,an application will request more memory than it needs. In order to cope with the large space allocation requirements of various applications, we have introduced a page fault mechanism and lazy allocation.
-
-##### 3. Lazy allocation
-
-​	After calling `sbrk()`, the only thing we need to do is to add the corresponding memory allocation to the `p->sz` field, but the kernel has not actually allocated the corresponding physical space. When the application needs to use the memory, it will cause a page fault, that is, when: $$va<p->sz$$ and $$p>stack$$, the kernel will use the `kalloc` function to allocate a page, Zero the page and map it to the table.
-
-##### 4.Page-fault Exceptions
-
-​	In the first experiment, we came into contact with the `fork` system call. This system call spawns a child process for the parent process, and the child process shares physical space with the parent process. But when the child process and the parent process write to the shared stack and heap, they will interrupt each other's operation. So we have a page fault mechanism. RISC-V has three different types of page faults:
-
-- **Load page error** (when the load instruction cannot convert its virtual address)
-- **Storage page fault** (when the storage instruction cannot translate its virtual address)
-- **Command page error** (when the command address cannot be converted)
-
-When a page fault occurs, the **`scause` register records the type of page fault; and the `stval` register contains an address that cannot be converted correctly**.
-
-​	Therefore, COW fork realizes that the parent and child nodes initially share all physical pages, but only map these pages. In addition, COW fork is transparent: no modification of the heap application is required.
-
-​	Another widely used feature, which is the subject of our experiment, is called lazy allocation. First, we need to understand the system call `sbrk`. When the program calls `sbrk`, the kernel increases the address space, but marks the new address as invalid in the page table. Since the program always requests more space than it actually uses, lazy allocation can be achieved: **The kernel allocates memory only when the program actually uses the memory**.
-
-​	In addition, the xv6 book also introduced us to another page fault feature: **Paging from Disk**. If a program requires more physical space than is currently free, the kernel will write some pages to storage devices such as disks and mark `pte` as invalid. When the program reads or writes the removed page, A page fault will occur.
-
-​	After understanding these pre-knowledges, we can complete the following experiments.
-
-## Problem 1--Eliminate Allocation from sbrk()
-
-> Your first task is to delete page allocation from the `sbrk(n)` system call implementation, which is the function `sys_sbrk()` in `sysproc.c`. The `sbrk(n)` system call grows the process's memory size by n bytes, and then returns the start of the newly allocated region (i.e., the old size). Your new `sbrk(n)` should just increment the process's size (`myproc()->sz`) by n and return the old size. It should not allocate memory -- so you should delete the call to `growproc()` (but you still need to increase the process's size!).
-
-#### 1.1 Goal Restatement
-
-​	The purpose of this experiment is to complete the preparations for lazy allocation, delete the part of memory allocation in `sys_sbrk()`, and only modify the size of `myproc->sz`.
-
-#### 1.2 Problem Analysis
-
-​	We only need to delete the code that allocates physical memory in `sysproc.c/sys_sbrk()`, and then add an increase in the address space.
-
-```c
-uint64
-sys_sbrk(void)
-{
-  int addr;
-  int n;
-  if(argint(0, &n) < 0)
-    return -1;
-  addr = myproc()->sz;
-  myproc()->sz=myproc()->sz+n;//只需要考虑地址空间的增加
-  //if(growproc(n) < 0)//增加应用程序的地址空间
-    //return -1;
-  return addr;
-}
-```
-
-Then `make qemu`, after entering `echo hi`, the following exception will occur:
-
-```shell
-$ echo hi
-usertrap(): unexpected scause 0x000000000000000f pid=3
-            sepc=0x00000000000012a6 stval=0x0000000000004008
-panic: uvmunmap: not mapped
-```
-
-​	The reason for the following page fault is that the shell needs `fork` `echo`, and then the child process executes `echo`, and the shell actually allocates some memory. In the output, we see that the value of the `scause` register is 15, the process id is 3, the value stored in the exception program counter is `12a6`, and the virtual address where the page fault occurs is `4008`.
-
- 	And in the assembly code of the shell, we can find that the instruction corresponding to the address `12a6` is completing the writing work, but the kernel has not actually allocated this part of the memory space.
-
-## Problem 2--Lazy Allocation
-
-> Modify the code in `trap.c` to respond to a page fault from user space by mapping a newly-allocated page of physical memory at the faulting address, and then returning back to user space to let the process continue executing. You should add your code just before the `printf` call that produced the "`usertrap()`: ..." message. Modify whatever other xv6 kernel code you need to in order to get `echo hi` to work.
-
-#### 2.1 Goal Restatement
-
-​	This question requires us to implement a basic lazy allocation scheme in the `usertrap()` function in `trap.c`, allocate specific physical pages in this function, and then switch to user mode to continue running subsequent programs.
-
-#### 2.2 Problem Analysis
-
-​	In this experiment, we need to accept the page error that occurred in the previous experiment, intercept the error in the right place and deal with it correctly. Therefore, we check in the `usertrap()` function whether the return value of the `r_scause()` function is 15 or 13, and then use the `r_stval()` function to obtain the virtual address of the page fault.
-
-```c
-//
-// handle an interrupt, exception, or system call from user space.
-// called from trampoline.S
-//
-void
-usertrap(void)
-{
-//////////////////////////////////////////////////////
-  } else if((which_dev = devintr()) != 0){
-    // ok
-  } else if (r_scause() == 15||r_scause() == 13)
-  {
-    uint64 va=r_stval();//获取产生页面错误的虚拟地址
-    uint64 ka=(uint64) kalloc();
-    if(ka==0) p->killed=-1;//如果没有可以分配的内存，则终止该进程
-    else{
-      memset((void*)ka,0,PGSIZE);//将页面清零
-      va=PGROUNDDOWN(va);//获取该物理页面的底部
-      if(mappages(p->pagetable,va,PGSIZE,ka,PTE_U|PTE_W|PTE_R)!=0)//将页面映射到用户地址空间中适当的地址
-      {
-        kfree((void*)ka);
-        p->killed=-1;
-      }
-    }
-  }
-  else{
-    //////////////////////////////////////////////////////
-  }
-///////////////////////////////////////////////////////////
-}
-```
-
-​	In the code, we can imitate the writing of `uvmalloc()`, first obtain the virtual address that caused the page fault, and then allocate it. If there is not enough memory space to allocate, the process is terminated directly. Otherwise, we initialize the newly allocated page to zero, then obtain the low address of the physical page, and map the page to the appropriate address in the user space to complete the modification.
-
-​	At this time, if you run `echo hi`, an error of `uvmunmap:not mapped` will be reported, so we find the `uvmunmap()` function of `vm.c` to find the reason. You can see that the function's panic information shows that we are releasing pages that have not yet been mapped, but we only moved the address when allocating memory space for the program. If the application has never used this part of the address space, then the mapping is actually still It does not exist because it has not been allocated yet, and is only allocated when needed, so it is reasonable for this error to occur here.
-
-​	So we only need to comment out this part of the `panic` error report, and then add `continue`.
-
-```c
-// Remove npages of mappings starting from va. va must be
-// page-aligned. The mappings must exist.
-// Optionally free the physical memory.
-void
-uvmunmap(pagetable_t pagetable, uint64 va, uint64 npages, int do_free)
-{
-/////////////////////////////////////////////////
-    if((pte = walk(pagetable, a, 0)) == 0)
-      // panic("uvmunmap: walk");
-      continue;
-    if((*pte & PTE_V) == 0)
-      // panic("uvmunmap: not mapped");
-      continue;
-/////////////////////////////////////////////////
-}
-```
-
-​	At this point, `echo hi` can run correctly.
-
-## Problem 3-- Lazytests and UserTests
-
-> We've supplied you with `lazytests`, an xv6 user program that tests some specific situations that may stress your lazy memory allocator. Modify your kernel code so that all of both `lazytests` and `usertests` pass.
+> The goal of copy-on-write (COW) fork() is to defer allocating and copying physical memory pages for the child until the copies are actually needed, if ever.
 >
-> - Handle negative `sbrk()` arguments.
-> - Kill a process if it page-faults on a virtual memory address higher than any allocated with `sbrk()`.
-> - Handle the parent-to-child memory copy in `fork()` correctly.
-> - Handle the case in which a process passes a valid address from `sbrk()` to a system call such as read or write, but the memory for that address has not yet been allocated.
-> - Handle out-of-memory correctly: if `kalloc()` fails in the page fault handler, kill the current process.
-> - Handle faults on the invalid page below the user stack.
+> COW fork() creates just a pagetable for the child, with PTEs for user memory pointing to the parent's physical pages. COW fork() marks all the user PTEs in both parent and child as not writable. When either process tries to write one of these COW pages, the CPU will force a page fault. The kernel page-fault handler detects this case, allocates a page of physical memory for the faulting process, copies the original page into the new page, and modifies the relevant PTE in the faulting process to refer to the new page, this time with the PTE marked writeable. When the page fault handler returns, the user process will be able to write its copy of the page.
+>
+> COW fork() makes freeing of the physical pages that implement user memory a little trickier. A given physical page may be referred to by multiple processes' page tables, and should be freed only when the last reference disappears.
 
-#### 3.1 Goal Restatement
+​	Regarding the introduction of copying branches while writing, there has been a clearer explanation in the introduction part of the experimental document. And the following is the pre-knowledge about this part that I summarized when I watched the S.6801 course video.
 
-​	This question requires us to improve the function of lazy allocation in specific situations. In different situations, the lazy allocation mechanism can correctly handle page errors.
+##### Copy on write fork
 
-#### 3.2 Problem Analysis
+​	The first is the raising of the problem. When `shell` processes instructions, it creates a process through the `fork` function, and this process creates a copy of the `shell` process. Then the first thing executed by the child process of `shell` is to call `exec` to run some other programs such as `echo`. But before `fork` had a complete copy of the address space, and the `exec` program would discard the copied address space, which caused a waste of space.
 
-- **Handle negative `sbrk()` arguments.**
+​	The optimization given here is: instead of copying all the physical space when creating the child process, but directly set the page table entry (PTE) of the child process to point to the physical page corresponding to the parent process**. In order to ensure strong isolation between the parent process and the child process, we need to set the page table entry flag bits corresponding to the parent process and the child process to **read only**. Later, when the content of this part of the memory needs to be changed to cause a page fault, the corresponding physical page is copied.
 
-  Add the case where the processing parameter is negative to `sbrk()`, which is the memory `n` corresponding to `dealloc`. Make the following modifications in the `sys_sbrk()` function.
+## Problem --Implement copy-on-write
 
-  ```c
-  uint64
-  sys_sbrk(void)
-  {
-    int addr;
-    int n;
-  
-    if(argint(0, &n) < 0)
-      return -1;
-    addr = myproc()->sz;
-    if(n<0)
-    {
-      if(myproc()->sz+n<0)return -1;
-      else uvmdealloc(myproc()->pagetable,myproc()->sz,myproc()->sz+n);
-    }
-    myproc()->sz=myproc()->sz+n;//只需要考虑地址空间的增加
-    //if(growproc(n) < 0)//增加应用程序的地址空间
-      //return -1;
-    return addr;
-  }
-  ```
+> Your task is to implement copy-on-write fork in the xv6 kernel. You are done if your modified kernel executes both the `cowtest` and `usertests` programs successfully.
 
-- **Kill a process if it page-faults on a virtual memory address higher than any allocated with `sbrk()`.**
+#### Problem Analysis
 
-  The meaning of this question is: when a page fault is found, the virtual address read is larger than `myproc()->sz`, or the virtual address is smaller than the user stack of the process, or the requested space is not enough Time to terminate the process. So what we have to do is to add a big prerequisite to the trap processing function, which is `usertrap()`, that is, the minimum virtual address is not less than the bottom address of the user stack of the process, and the highest does not exceed the maximum address of the process.
+1. Select the reserved bit definition in PTE in ***kernel/riscv.h*** to mark whether a page is a flag bit of COW Fork page
 
-  ```c
-  ////////////////////////////////////////////////
-  else if (r_scause() == 15||r_scause() == 13)
-    {
-      uint64 va=r_stval();//获取产生页面错误的虚拟地址
-      if(va<p->sz&&va>PGROUNDDOWN(p->trapframe->sp))
+   ```c
+   // 记录应用了COW策略后fork的页面
+   #define PTE_F (1L << 8)
+   ```
+
+2. Make the following changes in `kalloc.c`:
+
+   1. The global variable `ref` that defines the reference count contains a spin lock and a reference count array. Since `ref` is a global variable, it will be initialized to 0. The reason for using a spin lock is: if there are two memories Shared memory M, the reference count of M is 2. At this time, if CPU1 wants to execute `fork` to generate the child process of P1, CPU2 must terminate P2. If two CPUs read the value 2 at the same time, then the reference saved by CPU1 after the execution is complete The count is 3, and the value saved by CPU2 is 1, which will cause an error.
+
+      ```c
+      struct ref_stru {
+        struct spinlock lock;
+        int cnt[PHYSTOP / PGSIZE];  // 引用计数
+      } ref;
+      ```
+
+   2. Then we initialize the spinlock of `ref` in knit:
+
+      ```c
+      void
+      kinit()
       {
-        uint64 ka = (uint64)kalloc();
-        if (ka == 0)
-          p->killed = -1; //如果没有可以分配的内存，则终止该进程
-        else
+      //////////////////////////////////////////
+        initlock(&ref.lock, "ref");
+      ////////////////////////////////////////
+      }
+      ```
+
+   3. Then we can modify the `kalloc` and `kfree` functions. Initialize the memory reference count in `kalloc` to 1, and subtract 1 from the reference count in the `kfree` function. When the reference count is 0, delete it.
+
+      ```c
+      void
+      kfree(void *pa)
+      {
+        struct run *r;
+        if(((uint64)pa % PGSIZE) != 0 || (char*)pa < end || (uint64)pa >= PHYSTOP)
+          panic("kfree");
+        //当且仅当引用计数为0时，回收空间
+        //否则仅仅是将引用计数减1
+        acquire(&ref.lock);
+        if(--ref.cnt[(uint64)pa/PGSIZE]==0)
         {
-          memset((void *)ka, 0, PGSIZE);                                          //将页面清零
-          va = PGROUNDDOWN(va);                                                   //获取该物理页面的底部
-          if (mappages(p->pagetable, va, PGSIZE, ka, PTE_U | PTE_W | PTE_R) != 0) //将页面映射到用户地址空间中适当的地址
-          {
-            kfree((void *)ka);
-            p->killed = -1;
-          }
+          release(&ref.lock);
+          r=(struct run*)pa;
+          // Fill with junk to catch dangling refs.
+          memset(pa, 1, PGSIZE);
+          acquire(&kmem.lock);
+          r->next = kmem.freelist;
+          kmem.freelist = r;
+          release(&kmem.lock);
+        }
+        else{
+          release(&ref.lock);
         }
       }
-      else{
-        p->killed=-1;
-      }
-      /////////////////////////////////////////////
-  ```
+      ```
 
-- **Handle the parent-to-child memory copy in `fork()` correctly.**
-
-  This question requires us to modify the `fork()` function to realize the correct handling when the parent process copies the address space to the child process.
-
-  ```c
-  int
-  uvmcopy(pagetable_t old, pagetable_t new, uint64 sz)
-  {
-  //////////////////////////////////////////////////
-    for(i = 0; i < sz; i += PGSIZE){
-      if((pte = walk(old, i, 0)) == 0)
-        //panic("uvmcopy: pte should exist");
-        continue;
-      if((*pte & PTE_V) == 0)
-        //panic("uvmcopy: page not present");
-        continue;
-  //////////////////////////////////////////////////
-  }
-  ```
-
-  Finally, when a system call is made, if the address is not mapped to the physical space, the corresponding physical address needs to be added to the page table. We know that the code to convert virtual addresses to physical addresses is in `exec.c`, so we modify the `walkaddr()` function accordingly.
-
-  ```c
-  uint64
-  walkaddr(pagetable_t pagetable, uint64 va)
-  {
-    pte_t *pte;
-    uint64 pa;
-    struct proc *p = myproc();
-  
-    if (va >= MAXVA)
-      return 0;
-  
-    pte = walk(pagetable, va, 0);
-    // sbrk increase sz but have not alloc memory yet.
-    if (pte == 0 || (*pte & PTE_V) == 0)
-    {
-      if (va >= p->sz || va < PGROUNDUP(p->trapframe->sp))
-        return 0;
-      char *mem = kalloc();
-      if (mem == 0)
+      ```c
+      void *
+      kalloc(void)
       {
-        printf("walkaddr: kalloc failed\n");
+        struct run *r;
+        acquire(&kmem.lock);
+        r = kmem.freelist;
+        if(r){
+          kmem.freelist = r->next;
+          acquire(&ref.lock);
+          ref.cnt[(uint64)r / PGSIZE] = 1; // 将引用计数初始化为1
+          release(&ref.lock);
+        }
+        release(&kmem.lock);
+      
+        if(r)
+          memset((char*)r, 5, PGSIZE); // fill with junk
+        return (void*)r;
+      }
+      
+      ```
+
+   4. Then we add the following four functions, the functions of these four functions are: determine whether a page is a COW page; copy-on write allocator; get the reference count of the current memory; increase the reference count of the current memory. In `cowalloc`, read the memory reference count. If it is 1, it means that only the current process refers to the physical memory (other processes have been allocated to other physical pages before), and you only need to change the PTE to enable `PTE_W`; otherwise It allocates physical pages and decrements the original memory reference count by one. This function needs to return the physical address, which will be used in `copyout`. The following is a detailed introduction to the implementation ideas of these four functions,
+
+      **First is the function to determine whether the page is a COW page:**
+
+      ```c
+      int cowpage(pagetable_t pagetable, uint64 va) {
+        if(va >= MAXVA)
+          return -1;
+        pte_t* pte = walk(pagetable, va, 0);
+        if(pte == 0)
+          return -1;
+        if((*pte & PTE_V) == 0)
+          return -1;
+        return (*pte & PTE_F ? 0 : -1);
+      }
+      ```
+
+      The input parameters of this function are to specify the page table to be queried and the virtual address va. Then judge the virtual address and the physical page obtained through the `walk` function.
+
+      **Then the copy-on-write allocator:**
+
+      ```c
+      void* cowalloc(pagetable_t pagetable, uint64 va) {
+        if(va % PGSIZE != 0)
+          return 0;
+        uint64 pa = walkaddr(pagetable, va);  // 获取对应的物理地址
+        if(pa == 0)
+          return 0;
+        pte_t* pte = walk(pagetable, va, 0);  // 获取对应的PTE
+        if(krefcnt((char*)pa) == 1) {
+          // 只剩一个进程对此物理地址存在引用
+          // 则直接修改对应的PTE即可
+          *pte |= PTE_W;
+          *pte &= ~PTE_F;
+          return (void*)pa;
+        } else {
+          // 多个进程对物理内存存在引用
+          // 需要分配新的页面，并拷贝旧页面的内容
+          char* mem = kalloc();
+          if(mem == 0)
+            return 0;
+          // 复制旧页面内容到新页
+          memmove(mem, (char*)pa, PGSIZE);
+          // 清除PTE_V，否则在mappagges中会判定为remap
+          *pte &= ~PTE_V;
+          // 为新页面添加映射
+          if(mappages(pagetable, va, PGSIZE, (uint64)mem, (PTE_FLAGS(*pte) | PTE_W) & ~PTE_F) != 0) {
+            kfree(mem);
+            *pte |= PTE_V;
+            return 0;
+          }
+          // 将原来的物理内存引用计数减1
+          kfree((char*)PGROUNDDOWN(pa));
+          return mem;
+        }
+      }
+      ```
+
+      First obtain the corresponding physical address and page table entry. Then deal with the referenced count of the process accordingly. If there is only one process that has a reference to this physical address, you can directly modify the corresponding PTE; if there are multiple processes that reference the physical process, you need to allocate a new page, copy the content of the employment surface, and then copy the page To the new page and add a mapping for the new page.
+
+      **Then get the reference count of the memory**, this function is relatively simple, so I won't repeat it.
+
+      ```c
+      int krefcnt(void* pa) {
+        return ref.cnt[(uint64)pa / PGSIZE];
+      }
+      ```
+
+      **Finally is to increase the reference count of the memory:**
+
+      ```c
+      int kaddrefcnt(void* pa) {
+        if(((uint64)pa % PGSIZE) != 0 || (char*)pa < end || (uint64)pa >= PHYSTOP)
+          return -1;
+        acquire(&ref.lock);
+        ++ref.cnt[(uint64)pa / PGSIZE];
+        release(&ref.lock);
         return 0;
       }
-      if (mappages(p->pagetable, PGROUNDDOWN(va), PGSIZE, (uint64)mem, PTE_W | PTE_X | PTE_R | PTE_U) != 0)
-      {
-        printf("walkaddr: mappages failed\n");
-        kfree(mem);
-        return 0;
-      }
-      return (uint64)mem;
-    }
-    if ((*pte & PTE_U) == 0)
-      return 0;
-    pa = PTE2PA(*pte);
-    return pa;
-  }
-  ```
+      ```
 
-## Experience of this lab
+3. Then we need to modify `freerange`:
 
-​	Through this experiment, I learned the specific mechanism of the operating system to delay page allocation in actual situations. In the operating system courses we learned in class, we only understood the page allocation mechanism in a short answer, and in order to have a more in-depth understanding of this aspect.
+   ```c
+   void
+   freerange(void *pa_start, void *pa_end)
+   {
+     char *p;
+     p = (char*)PGROUNDUP((uint64)pa_start);
+     for(; p + PGSIZE <= (char*)pa_end; p += PGSIZE){
+       // 在kfree中将会对cnt[]减1，这里要先设为1，否则就会减成负数
+       ref.cnt[(uint64)p / PGSIZE] = 1;
+       kfree(p);
+     }
+   }
+   ```
 
-## Screenshot of lab process
+4. Finally modify `uvmcopy`. Do not allocate memory for the child process, but make the parent and child process share memory, but disable `PTE_W`, mark `PTE_F` at the same time, and call `kaddrefcnt` to increase the reference count.
 
-**1.Result of  problem 1**:
+   ```c
+   pte_t *pte;
+     uint64 pa, i;
+     uint flags;
+   
+     for(i = 0; i < sz; i += PGSIZE){
+       if((pte = walk(old, i, 0)) == 0)
+         panic("uvmcopy: pte should exist");
+       if((*pte & PTE_V) == 0)
+         panic("uvmcopy: page not present");
+       pa = PTE2PA(*pte);
+       flags = PTE_FLAGS(*pte);
+   
+       // 仅对可写页面设置COW标记
+       if(flags & PTE_W) {
+         // 禁用写并设置COW Fork标记
+         flags = (flags | PTE_F) & ~PTE_W;
+         *pte = PA2PTE(pa) | flags;
+       }
+   
+       if(mappages(new, i, PGSIZE, pa, flags) != 0) {
+         uvmunmap(new, 0, i / PGSIZE, 1);
+         return -1;
+       }
+       // 增加内存的引用计数
+       kaddrefcnt((char*)pa);
+     }
+     return 0;
+   ```
 
-<img src="https://joes-bucket.oss-cn-shanghai.aliyuncs.com/img/lab5-1.png" style="zoom:50%;" />
+5. Then modify `usertrap` to handle page errors
 
-**2. Result of problem 2**:
+   ```c
+   uint64 cause = r_scause();
+   if(cause == 8) {
+     ...
+   } else if((which_dev = devintr()) != 0){
+     // ok
+   } else if(cause == 13 || cause == 15) {
+     uint64 fault_va = r_stval();  // 获取出错的虚拟地址
+     if(fault_va >= p->sz
+       || cowpage(p->pagetable, fault_va) != 0
+       || cowalloc(p->pagetable, PGROUNDDOWN(fault_va)) == 0)
+       p->killed = 1;
+   } else {
+     ...
+   }
+   ```
 
-<img src="https://joes-bucket.oss-cn-shanghai.aliyuncs.com/img/lab5-2.png" style="zoom: 67%;" />
+6. Finally, we deal with the same situation in `copyout`, if it is a COW page, we need to change the physical address pointed to by `pa0`
 
-**3. Result of problem 3：**
+   ```c
+   while(len > 0){
+     va0 = PGROUNDDOWN(dstva);
+     pa0 = walkaddr(pagetable, va0);
+   
+     // 处理COW页面的情况
+     if(cowpage(pagetable, va0) == 0) {
+       // 更换目标物理地址
+       pa0 = (uint64)cowalloc(pagetable, va0);
+     }
+   
+     if(pa0 == 0)
+       return -1;
+     ...
+   }
+   ```
 
-<img src="https://joes-bucket.oss-cn-shanghai.aliyuncs.com/img/lab5-3.png" style="zoom:50%;" />
+   #### Result of the lab
 
-**4. Make Grade:**
+   <img src="https://joes-bucket.oss-cn-shanghai.aliyuncs.com/img/lab6-1.png" style="zoom:50%;" />
 
-![](https://joes-bucket.oss-cn-shanghai.aliyuncs.com/img/lab5-4.png)
+
+
+## Experience of this lab:
+
+​	This experiment taught me about the copy-on-write technology of the operating system kernel. In the traditional way in the past, the child process copied all the resources of the parent process, which had the disadvantages of high memory consumption, time-consuming copy operation, and low efficiency. This experiment made me understand the specific operation of copy-on-write by changing the code manually, that is, only copy the page table when fork, so that the address space of the parent and child processes point to the same physical memory page, and mark these pages as read-only . When one of the two processes wants to modify the corresponding physical page, a page fault will be triggered. At this time, the kernel will copy the content of the page as a new physical page, set it to a writable state, allocate the new physical page to the writing process, and re-execute the write operation.
+
+## Screenshot of this lab:
+
+<img src="https://joes-bucket.oss-cn-shanghai.aliyuncs.com/img/lab6-2.png" style="zoom: 50%;" />
+
