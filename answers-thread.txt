@@ -1,0 +1,5 @@
+假设现在有两个线程T1和T2，两个线程都走到put函数，
+且假设两个线程中key%NBUCKET相等，即要插入同一个散列桶中。
+两个线程同时调用insert(key, value, &table[i], table[i])，
+insert是通过头插法实现的。如果先insert的线程还未返回另一个
+线程就开始insert，那么前面的数据会被覆盖
