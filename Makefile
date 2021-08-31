@@ -1,4 +1,3 @@
-
 # To compile and run with a lab solution, set the lab name in lab.mk
 # (e.g., LB=util).  Run make grade to test solution with the lab's
 # grade script (e.g., grade-lab-util).
@@ -175,6 +174,7 @@ UPROGS=\
 	$U/_grind\
 	$U/_wc\
 	$U/_zombie\
+	$U/_mmaptest\
 
 
 
@@ -209,6 +209,7 @@ $U/uthread_switch.o : $U/uthread_switch.S
 
 $U/_uthread: $U/uthread.o $U/uthread_switch.o $(ULIB)
 	$(LD) $(LDFLAGS) -N -e main -Ttext 0 -o $U/_uthread $U/uthread.o $U/uthread_switch.o $(ULIB)
+	$(OBJDUMP) -S $U/_uthread > $U/uthread.asm
 
 ph: notxv6/ph.c
 	gcc -o ph -g -O2 notxv6/ph.c -pthread
